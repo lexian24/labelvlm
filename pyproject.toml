@@ -37,7 +37,8 @@ dependencies = [
   "pyyaml",
   "scikit-image",
   "torch",
-  "transformers",
+  "transformers"
+  "torchvision",
 ]
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
