@@ -104,7 +104,7 @@ import torch
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from loguru import logger
 
-
+'''
 model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
 logger.debug(f"Loading Qwen2.5-VL model from {model_path}")
 model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, torch_dtype=torch.float32)
@@ -126,7 +126,7 @@ processor = AutoProcessor.from_pretrained(model_path)
 
 model.to(device)
 model.eval()
-'''
+
 
 import json
 import logging
@@ -302,7 +302,7 @@ def inference(
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": [{"type": "text", "text": prompt}, {"image": image}]}
     ]
-    
+    """
     # Prepare text input for the model
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = processor(text=[text], images=[image], return_tensors="pt").to('cpu')
@@ -326,7 +326,7 @@ def inference(
     # Post-process generated output
     generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
     output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    """
+    
 
     if return_input:
         return output_text[0], inputs  # Optionally return input for debugging or tracing
