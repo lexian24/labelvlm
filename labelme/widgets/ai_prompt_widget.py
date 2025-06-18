@@ -23,6 +23,17 @@ class AiPromptWidget(QtWidgets.QWidget):
             logger.warning("Cannot get text prompt")
             return ""
         return widget.get_text_prompt()
+    
+    def set_text_prompt(self, text: str) -> None:
+        """Populate the internal QLineEdit with `text`."""
+        layout = self.layout()
+        if not layout:
+            return
+        item = layout.itemAt(0)
+        if not item or not item.widget():
+            return
+        # Delegate to the child widget
+        item.widget().set_text_prompt(text)
 
 
 class _TextPromptWidget(QtWidgets.QWidget):
@@ -32,7 +43,7 @@ class _TextPromptWidget(QtWidgets.QWidget):
         self.setLayout(QtWidgets.QHBoxLayout())
         self.layout().setContentsMargins(0, 0, 0, 0)  # type: ignore[union-attr]
 
-        label = QtWidgets.QLabel(self.tr("AI Prompt"))
+        label = QtWidgets.QLabel(self.tr("VLM Prompt"))
         self.layout().addWidget(label)  # type: ignore[union-attr]
 
         # Text input for the AI prompt
@@ -54,3 +65,15 @@ class _TextPromptWidget(QtWidgets.QWidget):
             logger.warning("Cannot get text prompt")
             return ""
         return widget.text()
+
+    def set_text_prompt(self, text: str) -> None:
+        """Set the QLineEdit’s text to `text`."""
+        layout = self.layout()
+        if not layout:
+            return
+        # The QLineEdit is the second item (index 1) in this layout:
+        item = layout.itemAt(1)
+        if not item or not item.widget():
+            return
+        line_edit = item.widget()
+        line_edit.setText(text)
