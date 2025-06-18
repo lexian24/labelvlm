@@ -35,6 +35,7 @@ from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
+from labelme._automation.bbox_from_text import inference
 
 from . import utils
 
@@ -46,7 +47,7 @@ from . import utils
 
 
 LABEL_COLORMAP = imgviz.label_colormap()
-
+          
 
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
@@ -620,6 +621,16 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
 
+        # ——— Describe action for context menu ————————————————————
+        self.describeAction = action(
+            self.tr("Describe"),
+            slot=self.on_describe_shape,
+            shortcut=None,
+            icon="info",
+            tip=self.tr("Describe contents of the selected bounding box"),
+            enabled=False,
+        )
+
         fill_drawing = action(
             self.tr("Fill Drawing Polygon"),
             self.canvas.setFillDrawing,
@@ -713,6 +724,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 undo,
                 undoLastPoint,
                 removePoint,
+                None,
+                self.describeAction,
             ),
             onLoadActive=(
                 close,
@@ -803,7 +816,7 @@ class MainWindow(QtWidgets.QMainWindow):
         selectAiModel.setDefaultWidget(QtWidgets.QWidget())
         selectAiModel.defaultWidget().setLayout(QtWidgets.QVBoxLayout())  # type: ignore[union-attr]
         #
-        selectAiModelLabel = QtWidgets.QLabel(self.tr("AI Mask Model"))
+        selectAiModelLabel = QtWidgets.QLabel(self.tr("SAM Mask Model"))
         selectAiModelLabel.setAlignment(QtCore.Qt.AlignCenter)  # type: ignore[attr-defined]
         selectAiModel.defaultWidget().layout().addWidget(selectAiModelLabel)  # type: ignore[union-attr]
         #
@@ -880,7 +893,7 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             selectAiModel,
             None,
-            ai_prompt_action,
+            #ai_prompt_action,
             ai_label_prompt_action,
         )
 
@@ -944,11 +957,65 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
 
         self.populateModeActions()
-        """
-        add description dock
-        """
+        
+        '''
+        # ─── Custom AI Prompt dock with inline Submit button ──────────────────────
+        self.prompt_dock = QtWidgets.QDockWidget(self.tr("VLM Prompt"), self)
+        self.prompt_dock.setObjectName("PromptDock")
 
-        # Ensure description_dock and descriptionEditor are initialized and added to the layout
+        # Container widget for prompt editor + submit button
+        container = QtWidgets.QWidget()
+        vlayout = QtWidgets.QVBoxLayout(container)
+        vlayout.setContentsMargins(4, 4, 4, 4)
+
+        # 1) Multi-line prompt editor
+        self.promptEditor = QtWidgets.QPlainTextEdit()
+        self.promptEditor.setPlaceholderText(self.tr("Enter AI prompt here..."))
+        # Mark dirty when user types
+        self.promptEditor.textChanged.connect(lambda: self.setDirty())
+        vlayout.addWidget(self.promptEditor)
+
+        # 2) Submit button
+        submit_btn = QtWidgets.QPushButton(self.tr("Submit"))
+        submit_btn.clicked.connect(self.submit_custom_ai_prompt)
+        vlayout.addWidget(submit_btn)
+
+        self.prompt_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.prompt_dock)
+        '''
+        # ─── Custom AI Prompts dock (history + Add/Remove) ──────────────────────
+        from PyQt5.QtWidgets import QListWidget, QInputDialog
+
+        self.prompt_dock = QtWidgets.QDockWidget(self.tr("VLM Prompts"), self)
+        self.prompt_dock.setObjectName("PromptHistoryDock")
+        container = QtWidgets.QWidget()
+        vlayout = QtWidgets.QVBoxLayout(container)
+        vlayout.setContentsMargins(4, 4, 4, 4)
+
+        # 1) History list
+        self.promptListWidget = QListWidget()
+        vlayout.addWidget(self.promptListWidget)
+
+        # 2) Add/Remove buttons
+        hlayout = QtWidgets.QHBoxLayout()
+        self.addPromptBtn = QtWidgets.QPushButton(self.tr("Add Prompt"))
+        self.removePromptBtn = QtWidgets.QPushButton(self.tr("Remove Prompt"))
+        hlayout.addWidget(self.addPromptBtn)
+        hlayout.addWidget(self.removePromptBtn)
+        vlayout.addLayout(hlayout)
+
+        self.prompt_dock.setWidget(container)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.prompt_dock)
+
+        # Internal store of prompt/description pairs
+        self.prompt_history: List[Dict[str,str]] = []
+
+        # Wire up UI
+        self.addPromptBtn.clicked.connect(self.on_add_prompt)
+        self.removePromptBtn.clicked.connect(self.on_remove_prompt)
+        self.promptListWidget.currentRowChanged.connect(self.on_prompt_selected)
+        self.promptListWidget.itemDoubleClicked.connect(self.on_edit_prompt)
+        # ---- Ensure description_dock and descriptionEditor are initialized and added to the layout
         self.description_dock = QtWidgets.QDockWidget(self.tr("VLM Description"), self)
         self.description_dock.setObjectName("DescriptionDock")
         self.description_dock.setFeatures(
@@ -962,11 +1029,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.descriptionEditor.setReadOnly(False)  # Make it editable
         self.description_dock.setWidget(self.descriptionEditor)
 
-        # Add the dock widget to the right side alongside others
         self.addDockWidget(Qt.RightDockWidgetArea, self.description_dock)
         self.descriptionEditor.textChanged.connect(lambda: self.setDirty())
-
-
         # Place it, for example, below the Custom AI Prompt dock
         #self.splitDockWidget(self._ai_prompt_widget, self._ai_label_dock, Qt.Vertical)
 
@@ -1069,9 +1133,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def submit_custom_ai_prompt(self):
         from labelme._automation.bbox_from_text import inference
+        prompt_text = self.promptEditor.toPlainText().strip()
 
+        if not prompt_text:
+            return self.errorMessage("Error", "Please enter a prompt in the dock.")
+        
+        self.status("Running AI description…")
+        try:
+            description_text = inference(self.imagePath, prompt_text)
+            # 4. Populate the description dock
+            self.descriptionEditor.setPlainText(description_text)
+            self.setDirty()
+            self.status("AI description complete.")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.errorMessage("Error", f"AI description failed:\n{e}")
+    '''
+    def submit_custom_ai_prompt(self):
+        from labelme._automation.bbox_from_text import inference
+        
         # 1. Grab the user’s prompt text
         prompt_text = self._ai_prompt_widget.get_text_prompt().strip()
+        if hasattr(self, "promptEditor"):
+            self.promptEditor.setPlainText(prompt_text)
         if not prompt_text:
             return self.errorMessage("Error", "Please enter a prompt.")
 
@@ -1094,7 +1179,7 @@ class MainWindow(QtWidgets.QMainWindow):
             import traceback
             traceback.print_exc()
             self.errorMessage("Error", f"AI description failed:\n{e}")
-
+    '''
     '''
     def _submit_ai_prompt(self, _) -> None:
         texts = self._ai_prompt_widget.get_text_prompt().split(",")
@@ -1398,6 +1483,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.duplicate.setEnabled(n_selected)  # type: ignore[attr-defined]
         self.actions.copy.setEnabled(n_selected)  # type: ignore[attr-defined]
         self.actions.edit.setEnabled(n_selected)  # type: ignore[attr-defined]
+        self.describeAction.setEnabled(n_selected == 1)
+
 
     def addLabel(self, shape):
         if shape.group_id is None:
@@ -1542,6 +1629,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         other_data = self.otherData or {}
         other_data["vlm_description"] = self.descriptionEditor.toPlainText()
+        #other_data["custom_ai_prompt"] = self.promptEditor.toPlainText()
+        other_data["prompt_history"] = self.prompt_history
         self.otherData = other_data
         
         try:
@@ -1552,7 +1641,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lf.save(
                 filename=filename,
                 shapes=shapes,
-                otherData=self.otherData,
+                otherData=other_data,
                 imagePath=imagePath,
                 imageData=imageData,
                 imageHeight=self.image.height(),
@@ -1795,16 +1884,30 @@ class MainWindow(QtWidgets.QMainWindow):
             description_text = self.otherData.get("vlm_description", "")
             if hasattr(self, "descriptionEditor"):
                 self.descriptionEditor.setPlainText(description_text)
+
+            # === New code to load AI prompt into promptEditor ===
+            self.prompt_history = self.otherData.get("prompt_history", [])
+            self.promptListWidget.clear()
+            for entry in self.prompt_history:
+                self.promptListWidget.addItem(entry["prompt"])
+            # select first by default
+            if self.prompt_history:
+                self.promptListWidget.setCurrentRow(0)
         else:
             self.imageData = LabelFile.load_image_file(filename)
             if self.imageData:
                 self.imagePath = filename
             self.labelFile = None
-
+            # might cause problem
+            self.prompt_history.clear()
+            self.promptListWidget.clear()
             # Clear the description editor if no label file
             if hasattr(self, "descriptionEditor"):
                 self.descriptionEditor.clear()
 
+            #if hasattr(self, "promptEditor"):
+            #    self.promptEditor.clear()
+            #self.promptEditor.clear()
         image = QtGui.QImage.fromData(self.imageData)
 
         if image.isNull():
@@ -2423,12 +2526,191 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loadShapes(shapes, replace=False)
 
             # Any “description” returned from the model goes into the description dock:
-            self.descriptionEditor.setPlainText(description_text)
+            if description_text and description_text.strip():
+                old = self.descriptionEditor.toPlainText().strip()
+                new = description_text.strip()
+                if old:
+                    self.descriptionEditor.setPlainText(old + "\n\n" + new)
+                else:
+                    self.descriptionEditor.setPlainText(new)
             self.setDirty()
             self.status("AI Label complete.")
         except Exception as e:
             import traceback; traceback.print_exc()
             self.errorMessage("Error", f"AI auto‐labeling failed:\n{e}")
+    
+    def on_add_prompt(self):
+        # Ask the user for a new prompt
+        from PyQt5.QtWidgets import QInputDialog
+        prompt, ok = self._get_prompt_from_dialog(self.tr("New AI Prompt"), "")
+        if not ok or not prompt.strip():
+            return
 
-            
+        # Run the model
+        self.status(self.tr("Running AI description…"))
+        try:
+            desc = inference(self.imagePath, prompt)
+        except Exception as e:
+            self.errorMessage(self.tr("Error"), str(e))
+            return
 
+        # Store and display
+        entry = {"prompt": prompt, "description": desc}
+        self.prompt_history.append(entry)
+        self.promptListWidget.addItem(prompt)
+        row = len(self.prompt_history) - 1
+        self.promptListWidget.setCurrentRow(row)
+
+        # Show in the VLM description dock
+        self.descriptionEditor.setPlainText(desc)
+        self.setDirty()
+
+    def on_remove_prompt(self):
+        row = self.promptListWidget.currentRow()
+        if row < 0:
+            return
+        # Remove from UI + data
+        self.prompt_history.pop(row)
+        self.promptListWidget.takeItem(row)
+        self.setDirty()
+
+        # Select previous or clear
+        if self.prompt_history:
+            new_row = min(row, len(self.prompt_history)-1)
+            self.promptListWidget.setCurrentRow(new_row)
+        else:
+            self.descriptionEditor.clear()
+
+    def on_prompt_selected(self, row: int):
+        if row < 0 or row >= len(self.prompt_history):
+            return
+        # Display the associated description
+        entry = self.prompt_history[row]
+        # 1) Show the saved description
+        desc = entry["description"]
+        self.descriptionEditor.setPlainText(desc)
+
+        # 2) If this entry came from a Describe call, highlight that box
+        bbox = entry.get("bbox")
+        if bbox:
+            x1, y1, x2, y2 = bbox
+            # find the matching shape on the canvas
+            match = None
+            for shape in self.canvas.shapes:
+                if shape.shape_type == "rectangle":
+                    p1, p2 = shape.points
+                    if (
+                        int(p1.x()) == x1 and int(p1.y()) == y1
+                        and int(p2.x()) == x2 and int(p2.y()) == y2
+                    ):
+                        match = shape
+                        break
+            # now select it (and clear any other selection)
+            if match:
+                self.canvas.selectedShapes = [match]
+                self.shapeSelectionChanged([match])
+        else:
+            # no bbox → just clear selection
+            self.canvas.selectedShapes = []
+            self.shapeSelectionChanged([])
+
+    def on_edit_prompt(self, item: QtWidgets.QListWidgetItem):
+        """Double-click handler: edit an existing prompt, re-run inference."""
+        row = self.promptListWidget.row(item)
+        old = self.prompt_history[row]["prompt"]
+        # Open the same dialog, seeded with the old prompt
+        new_prompt, ok = self._get_prompt_from_dialog(self.tr("Edit AI Prompt"), old)
+        if not ok or not new_prompt.strip() or new_prompt == old:
+            return
+
+        # Re-run the model on the new prompt
+        try:
+            desc = inference(self.imagePath, new_prompt)
+        except Exception as e:
+            self.errorMessage(self.tr("Error"), f"AI inference failed:\n{e}")
+            return
+
+        # Update history, UI list, and description dock
+        self.prompt_history[row] = {"prompt": new_prompt, "description": desc}
+        item.setText(new_prompt)
+        self.promptListWidget.setCurrentRow(row)
+        self.descriptionEditor.setPlainText(desc)
+        self.setDirty()
+
+    def _get_prompt_from_dialog(self, title: str, initial: str):
+        """
+        Helper: open a QDialog with a QPlainTextEdit for multi-line prompts.
+        Returns (text, accepted_bool).
+        """
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        edit = QtWidgets.QPlainTextEdit()
+        edit.setPlainText(initial)
+        edit.setMinimumSize(400, 150)
+        layout.addWidget(edit)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+        res = dlg.exec_() == QtWidgets.QDialog.Accepted
+        return edit.toPlainText().strip(), res
+    
+    def on_describe_shape(self):
+        """
+        Right-click → Describe: highlight the selected rectangle in red,
+        ask the VLM 'What is in the red bounding box?', then record
+        that prompt+answer in your prompt history.
+        """
+        from labelme._automation.bbox_from_text import inference
+        import tempfile, os
+        # 1) Make sure exactly one rectangle is selected
+        shapes = self.canvas.selectedShapes
+        if len(shapes) != 1 or shapes[0].shape_type != "rectangle":
+            return
+
+        # 2) Extract box coordinates
+        shape = shapes[0]
+        p1, p2 = shape.points
+        x1, y1 = int(p1.x()), int(p1.y())
+        x2, y2 = int(p2.x()), int(p2.y())
+
+        # 3) Copy the image and draw a thick red rectangle
+        img_copy = QtGui.QImage(self.image)  # deep copy
+        painter = QtGui.QPainter(img_copy)
+        pen = QtGui.QPen(QtGui.QColor(255, 0, 0))
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+        painter.end()
+
+        #img_copy.save(os.path.join(os.path.expanduser("~"), "Desktop", "bbox_debug.png"),"PNG")
+
+
+        # 4) Convert to NumPy and run inference
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        img_copy.save(tmp_path, "PNG")
+        prompt = "What is in the bounding box?"
+        try:
+            desc = inference(tmp_path, prompt)
+        except Exception as e:
+            return self.errorMessage(self.tr("Error"), str(e))
+        finally:
+            try: os.remove(tmp_path)
+            except OSError: pass
+
+        # 5) Append to your prompt history UI
+        entry = {"prompt": prompt, "description": desc, "bbox": [x1, y1, x2, y2]}
+        self.prompt_history.append(entry)
+        self.promptListWidget.addItem(prompt)
+        idx = len(self.prompt_history) - 1
+        self.promptListWidget.setCurrentRow(idx)
+
+        # 6) Show in the description dock and mark dirty
+        self.descriptionEditor.setPlainText(desc)
+        self.setDirty()
+        self.status(self.tr("Describe complete."))
